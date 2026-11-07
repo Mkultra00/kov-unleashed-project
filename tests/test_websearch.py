@@ -103,6 +103,10 @@ def test_block_offline(fake_sources, monkeypatch):
     monkeypatch.setattr(ws, "facilities", dead)
     monkeypatch.setattr(ws, "wiki", dead)
     monkeypatch.setattr(ws, "recent_quakes", dead)
+    # the Tinfoil enclave lane is a real network source once a key is on the
+    # box — isolate it here so the offline test stays offline.
+    import seraph.tinfoil_websearch as tws
+    monkeypatch.setattr(tws, "available", lambda: False)
     block = asyncio.run(ws.emergency_block("earthquake near Lisbon, what now?"))
     assert block.startswith("LIVE WEB CHECK")  # graceful degradation
     assert "112" in block                      # portugal numbers still present

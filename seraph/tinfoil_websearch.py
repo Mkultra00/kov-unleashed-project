@@ -49,18 +49,41 @@ def available() -> bool:
         return False
 
 
+def _parse_sse(raw: bytes) -> dict:
+    """Streamable-HTTP MCP may answer with JSON or SSE ('event:… data: {…}').
+
+    Prefer the last data line that parses (matches stream-order results)."""
+    body = raw.decode("utf-8", "replace")
+    if body.lstrip().startswith("{"):
+        try:
+            return json.loads(body)
+        except ValueError:
+            pass
+    out = {}
+    for line in body.splitlines():
+        line = line.strip()
+        if line.startswith("data:") and len(line) > 5:
+            payload = line[5:].strip()
+            if payload and payload != "[DONE]":
+                try:
+                    out = json.loads(payload)
+                except ValueError:
+                    continue
+    return out
+
+
 def _rpc(payload: dict, key: str, session: str | None) -> tuple[dict, str | None]:
     req = urllib.request.Request(
         MCP_URL, data=json.dumps(payload).encode(), method="POST",
         headers={"Content-Type": "application/json",
-                 "Accept": "application/json",
+                 "Accept": "application/json, text/event-stream",
                  "Authorization": f"Bearer {key}",
                  **({"mcp-session-id": session} if session else {})})
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
             sid = r.headers.get("mcp-session-id")
             raw = r.read()
-            return (json.loads(raw) if raw else {}), sid
+            return _parse_sse(raw), sid
     except urllib.error.HTTPError as e:
         try:
             detail = e.read()[:120]
@@ -79,13 +102,16 @@ def search(query: str) -> str:
     key = credentials()["TINFOIL_API_KEY"]
     session: str | None = None
     try:
-        # streamable HTTP: initialize first; session id may come back in a header
+        # streamable HTTP: initialize; server returns session id in a header;
+        # the spec requires an 'initialized' notification before calls.
         try:
             _, session = _rpc({
                 "jsonrpc": "2.0", "id": 0, "method": "initialize",
-                "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                "params": {"protocolVersion": "2025-06-18", "capabilities": {},
                            "clientInfo": {"name": "seraph", "version": "1.0"}}},
                 key, session)
+            _rpc({"jsonrpc": "2.0", "method": "notifications/initialized"},
+                 key, session)
         except Exception:
             session = None
         out, session = _rpc({

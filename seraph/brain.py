@@ -16,6 +16,7 @@ battle-tested sovereign lane.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -65,6 +66,14 @@ def _reply_from(resp: dict) -> str | None:
         return None
 
 
+def _try_json(s: str):
+    """Best-effort decode of a stringified JSON literal ('[\\"uptime\\"]' -> list)."""
+    try:
+        return json.loads(s)
+    except (ValueError, TypeError):
+        return s
+
+
 def _lane_gw(user_text: str, history: list, runner: Callable | None,
              timeout_s: float, context: str = "") -> BrAnswer:
     t0 = time.time()
@@ -92,17 +101,41 @@ def _lane_ollama(user_text: str, history: list, runner: Callable | None,
         "You are Seraph — the voice presence of the Kov Unleashed assistant. "
         "Answer in at most three tight spoken sentences, then stop."
     )
+    if runner is not None:
+        # Agent-grade kit (terminal/browser/screen/type/websearch) rides along:
+        # native tool-calls when the model offers them, else a TOOL {} line.
+        system += (
+            "\n\nYou have real tools on the host Mac (terminal, browser, screen, "
+            "type, websearch). Use one ONLY when the question truly needs live "
+            "data; if the model lane supports tool-calls emit one normally. "
+            "Otherwise, when you need a tool, make the FIRST line exactly: "
+            'TOOL {"name": "<tool>", "args": {…}} and nothing else before it.'
+        )
     if context:
         system += "\n\n[RECALL — grounded facts, prefer these when relevant]\n" + context
     messages = ([{"role": "system", "content": system}]
                 + [{"role": m["role"], "content": m["content"]} for m in history[-8:]]
                 + [{"role": "user", "content": user_text}])
+    tools = None
+    if runner is not None:
+        try:
+            from .tools import TOOLS as _TOOLS
+            tools = _TOOLS
+        except Exception:  # noqa: BLE001 — kit missing → lane still works
+            tools = None
     try:
-        out = _chat(config.OLLAMA_BASE, config.OLLAMA_MODEL, messages, timeout_s=timeout_s)
+        out = _chat(config.OLLAMA_BASE, config.OLLAMA_MODEL, messages,
+                    tools=tools, timeout_s=timeout_s)
     except Exception as e:  # noqa: BLE001
         raise LaneUnavailable(f"ollama: {e}") from e
     text = _reply_from(out)
-    if not text:
+    try:
+        has_native = bool(out["choices"][0]["message"].get("tool_calls"))
+    except (KeyError, IndexError, TypeError):
+        has_native = False
+    if not text and not has_native:
+        # glm emits empty content when it answers with tool_calls only —
+        # that's not an empty reply; only raise when there is truly nothing.
         raise LaneUnavailable("ollama: empty reply")
     # Minimal tool pass — one round only; keep the voice loop fast.
     if runner is not None:
@@ -110,6 +143,19 @@ def _lane_ollama(user_text: str, history: list, runner: Callable | None,
             calls = out["choices"][0]["message"].get("tool_calls") or []
         except (KeyError, IndexError, TypeError):
             calls = []
+        if not calls and text:  # text-protocol fallback: TOOL {…} first line
+            m = re.match(r"\s*TOOL\s+(\{.*?\})\s*(?:\n|$)", text, re.S)
+            if m:
+                try:
+                    parsed = json.loads(m.group(1))
+                except json.JSONDecodeError:
+                    parsed = {}
+                name = str(parsed.get("name", "")).strip()
+                if name:
+                    calls = [{"function": {
+                        "name": name,
+                        "arguments": json.dumps(parsed.get("args") or {})}}]
+                    text = None  # TOOL line is not prose; fresh reply post-call
         if calls:
             call = calls[0]
             name = call["function"]["name"]
@@ -117,6 +163,11 @@ def _lane_ollama(user_text: str, history: list, runner: Callable | None,
                 args = json.loads(call["function"].get("arguments") or "{}")
             except json.JSONDecodeError:
                 args = {}
+            # glm quirk: list/dict literals arrive as STRINGS inside the key
+            # (e.g. {"argv": "[\"uptime\"]"}) — decode one level deeper.
+            if isinstance(args, dict):
+                args = {k: (_try_json(v) if isinstance(v, str) and v[:1] in "[{" else v)
+                        for k, v in args.items()}
             result = str(runner(name, args))[:800]
             tool_runs.append(name)
             messages += [
@@ -127,6 +178,7 @@ def _lane_ollama(user_text: str, history: list, runner: Callable | None,
             ]
             out = _chat(config.OLLAMA_BASE, config.OLLAMA_MODEL, messages, timeout_s=timeout_s)
             text = _reply_from(out) or text
+    text = (text or "").strip() or "Tool ran, but the reply came back empty."
     return BrAnswer(text, "ollama", int((time.time() - t0) * 1000), tool_runs)
 
 

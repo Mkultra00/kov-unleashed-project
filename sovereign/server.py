@@ -231,10 +231,15 @@ async def turn(text: str | None = Form(None), audio: UploadFile | None = File(No
             and not websearch.is_emergency(user_text) and _suggest(user_text) is None):
         try:
             from seraph import cognee_memory as cog_store_mod  # noqa: E402 — local lane import
+            try:  # Kov-grade tool kit: terminal/browser/screen/type/websearch
+                from seraph import tools as seraph_tools
+            except Exception:  # noqa: BLE001, S110 — kit missing → plain reply
+                seraph_tools = None
             mem = await asyncio.to_thread(memory.memory_block, user_text)
             br = await asyncio.to_thread(
                 seraph_brain.reply, user_text, HISTORY[-8:], timeout_s=35.0,
-                context=(mem or ""))
+                context=(mem or ""),
+                tool_runner=(seraph_tools.run_tool if seraph_tools else None))
 
             async def _remember() -> None:
                 """Best-effort write lane: Cognee graph + JSONL audit, never blocks."""
