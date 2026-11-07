@@ -30,9 +30,11 @@
 <div id="out"></div>
 <script>
 const mic=document.getElementById('mic'),status=document.getElementById('status'),out=document.getElementById('out');
-let media=null,rec=null,chunks=[],busy=false;
+let media=null,rec=null,chunks=[],busy=false,actx=null;
+function unlock(){if(!actx)actx=new (window.AudioContext||window.webkitAudioContext)();if(actx.state==='suspended')actx.resume();}
 mic.onclick=async()=>{
   if(busy)return;
+  unlock(); // in-gesture: audio context must live here (iOS) or later play() blocks
   if(rec&&rec.state==='recording'){rec.stop();return;}
   try{
     if(!media)media=await navigator.mediaDevices.getUserMedia({audio:true});
@@ -47,7 +49,9 @@ async function send(chunks){
   mic.classList.remove('rec');mic.innerHTML='TAP TO&nbsp;TALK';busy=true;
   status.textContent='thinking…';
   const fd=new FormData();
-  fd.append('audio',new Blob(chunks,{type:'audio/webm'}),'utterance.webm');
+  const mt=(rec&&rec.mimeType)||'audio/webm'; // iOS records mp4 — send the REAL mime
+  const ext=mt.includes('mp4')?'m4a':mt.includes('ogg')?'ogg':mt.includes('wav')?'wav':'webm';
+  fd.append('audio',new Blob(chunks,{type:mt}),'utterance.'+ext);
   try{
     const r=await fetch('/api/turn',{method:'POST',body:fd});
     const j=await r.json();
@@ -57,11 +61,17 @@ async function send(chunks){
       add('atlas',j.reply+(j.operator?'  [operator: '+j.operator+']':''));
       status.textContent='';
       if(j.audio_b64){
-        const a=new Audio('data:audio/mp3;base64,'+j.audio_b64);
-        a.play().catch(()=>{ // autoplay policy: offer replay on the mic button
-          status.textContent='tap mic to hear replay';
-          mic.addEventListener('click',()=>{a.play().catch(()=>{});},{once:true});
-        });
+        const url='data:audio/mp3;base64,'+j.audio_b64;
+        try{ // WebAudio path: context unlocked at tap-time, survives autoplay policy
+          const raw=Uint8Array.from(j.audio_b64.split('').map(c=>c.charCodeAt(0)));
+          if(actx.state==='suspended')actx.resume();
+          const buf=await actx.decodeAudioData(raw.buffer);
+          const src=actx.createBufferSource();src.buffer=buf;src.connect(actx.destination);src.start();
+        }catch(perr){ // fallback: element autoplays where allowed
+          new Audio(url).play().catch(()=>{status.textContent='tap ▶ to hear';});
+        }
+        const p=document.createElement('audio');p.controls=true;p.src=url; // manual player, always present
+        const msg=out.firstElementChild;if(msg)msg.appendChild(p);
       }
     }
   }catch(e){status.textContent='server error: '+e;}
