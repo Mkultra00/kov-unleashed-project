@@ -54,7 +54,9 @@ async function send(chunks){
   fd.append('audio',new Blob(chunks,{type:mt}),'utterance.'+ext);
   try{
     const r=await fetch('/api/turn',{method:'POST',body:fd});
-    const j=await r.json();
+    const txt=await r.text();let j;
+    try{j=JSON.parse(txt)}
+    catch(_){throw new Error('connection hiccup (http '+r.status+') — tap to retry');}
     if(j.error){status.textContent='error: '+j.error;}
     else{
       add('you',j.transcript||'(no transcript)');
