@@ -230,8 +230,22 @@ async def turn(text: str | None = Form(None), audio: UploadFile | None = File(No
             and seraph_cfg.SERAPH_ENABLED
             and not websearch.is_emergency(user_text) and _suggest(user_text) is None):
         try:
+            from seraph import cognee_memory as cog_store_mod  # noqa: E402 — local lane import
+            mem = await asyncio.to_thread(memory.memory_block, user_text)
             br = await asyncio.to_thread(
-                seraph_brain.reply, user_text, HISTORY[-8:], timeout_s=35.0)
+                seraph_brain.reply, user_text, HISTORY[-8:], timeout_s=35.0,
+                context=(mem or ""))
+
+            async def _remember() -> None:
+                """Best-effort write lane: Cognee graph + JSONL audit, never blocks."""
+                try:
+                    await asyncio.to_thread(cog_store_mod.store,
+                                            f"user turn to Seraph: {user_text}"[:400])
+                except Exception:  # noqa: BLE001, S110 — memory write is optional
+                    pass
+
+            asyncio.get_running_loop().create_task(_remember())
+            history_row = f"turn: {user_text}"[:400]
             HISTORY.append({"role": "user", "content": user_text})
             HISTORY.append({"role": "assistant", "content": br.text})
             payload = {"transcript": transcript, "reply": br.text,
@@ -243,6 +257,10 @@ async def turn(text: str | None = Form(None), audio: UploadFile | None = File(No
                     payload["audio_b64"] = base64.b64encode(audio_bytes).decode()
                 except Exception as exc:  # voice lane optional; text still returns
                     payload["audio_error"] = f"{type(exc).__name__}: {exc}"
+            try:
+                memory.remember(history_row)
+            except Exception:  # noqa: BLE001, S110 — audit trail optional
+                pass
             return JSONResponse(payload)
         except Exception:  # noqa: BLE001 — Atlas lane is the always-on fallback
             pass

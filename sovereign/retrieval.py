@@ -80,10 +80,13 @@ def _vector_rank(query: str, docs: list[tuple[str, str]], k: int) -> list[dict[s
     qv = _EMB_CACHE.get(query)
     if not qv:
         return None
+    # bge baseline: gibberish/small-talk sit ~0.48-0.54, real matches 0.60+
+    floor = float(os.getenv("SERAPH_SIE_MIN_COS", "0.60"))
     scored = sorted(((_cos(qv, _EMB_CACHE.get(b, [])), i) for i, (_, b) in enumerate(docs)),
                     key=lambda p: -p[0])
     return [{"title": docs[i][0], "body": docs[i][1], "via": "sie"}
-            for _, i in scored[:k] if _EMB_CACHE.get(docs[i][1])]
+            for s, i in scored[:k]
+            if s >= floor and _EMB_CACHE.get(docs[i][1])]
 
 
 def retrieve(query: str, k: int = 3) -> list[dict[str, str]]:

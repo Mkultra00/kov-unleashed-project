@@ -66,9 +66,13 @@ def _reply_from(resp: dict) -> str | None:
 
 
 def _lane_gw(user_text: str, history: list, runner: Callable | None,
-             timeout_s: float) -> BrAnswer:
+             timeout_s: float, context: str = "") -> BrAnswer:
     t0 = time.time()
-    messages = ([{"role": m["role"], "content": m["content"]} for m in history[-8:]]
+    system = "Answer in at most three tight spoken sentences, then stop."
+    if context:
+        system += "\n\n[RECALL — grounded facts, prefer these when relevant]\n" + context
+    messages = ([{"role": "system", "content": system}]
+                + [{"role": m["role"], "content": m["content"]} for m in history[-8:]]
                 + [{"role": "user", "content": user_text}])
     try:
         out = _chat(config.GW_BASE, config.GW_MODEL, messages, timeout_s=timeout_s)
@@ -81,13 +85,15 @@ def _lane_gw(user_text: str, history: list, runner: Callable | None,
 
 
 def _lane_ollama(user_text: str, history: list, runner: Callable | None,
-                 timeout_s: float) -> BrAnswer:
+                 timeout_s: float, context: str = "") -> BrAnswer:
     t0 = time.time()
     tool_runs: list[str] = []
     system = (
         "You are Seraph — the voice presence of the Kov Unleashed assistant. "
         "Answer in at most three tight spoken sentences, then stop."
     )
+    if context:
+        system += "\n\n[RECALL — grounded facts, prefer these when relevant]\n" + context
     messages = ([{"role": "system", "content": system}]
                 + [{"role": m["role"], "content": m["content"]} for m in history[-8:]]
                 + [{"role": "user", "content": user_text}])
@@ -149,19 +155,21 @@ def _lane_hermes(user_text: str, history: list, runner: Callable | None,
 
 
 def reply(user_text: str, history: list | None = None, *, tool_runner: Callable | None = None,
-          timeout_s: float = 40.0) -> BrAnswer:
-    """Run user_text through the best lane; raise LaneUnavailable if all fail."""
+          timeout_s: float = 40.0, context: str = "") -> BrAnswer:
+    """Run user_text through the best lane; raise LaneUnavailable if all fail.
+    `context` = recall block (e.g. Cognee graph hits) injected as system grounding."""
     want = config.SERAPH_BRAIN
     order = ("gw", "ollama") if want == "auto" else (want,)
     tried: list[str] = []
     for lane in order:
         try:
             if lane == "gw":
-                return _lane_gw(user_text, history or [], tool_runner, timeout_s)
+                return _lane_gw(user_text, history or [], tool_runner, timeout_s, context)
             if lane == "ollama":
-                return _lane_ollama(user_text, history or [], tool_runner, timeout_s)
+                return _lane_ollama(user_text, history or [], tool_runner, timeout_s, context)
             if lane == "hermes":
-                return _lane_hermes(user_text, history or [], tool_runner, timeout_s)
+                injected = f"{user_text}\n\n[RECALL]\n{context}" if context else user_text
+                return _lane_hermes(injected, history or [], tool_runner, timeout_s)
         except LaneUnavailable as e:
             tried.append(f"{lane}: {e}")
             if want != "auto":

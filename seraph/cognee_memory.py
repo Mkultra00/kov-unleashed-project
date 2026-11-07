@@ -1,10 +1,12 @@
 """Cognee Memory adapter — Cognee Cloud knowledge-graph lanes.
 
-Auth (docs.cognee.ai): tenant base https://{tenant}.aws.cognee.ai + header
-X-Api-Key. Endpoints used: /api/v1/add (ingest), /api/v1/search (searchType
-INSIGHTS). Credentials live in the 0600 env file (COGNEE_TENANT_BASE,
-COGNEE_API_KEY); values never leave this process. Email/password bearer
-login stays as a legacy fallback path.
+Auth (dashboard-verified live): tenant base https://tenant-<id>.aws.cognee.ai +
+header X-Api-Key. Endpoints: /api/v1/add is MULTIPART (data file + datasetName
+field), /api/v1/cognify JSON {"datasets":[name]} builds the graph async,
+/api/v1/search JSON {"query", "search_type": "GRAPH_COMPLETION"} returns
+list of {dataset_name, search_result:[strings]}. Credentials live in the
+0600 env file (COGNEE_TENANT_BASE, COGNEE_API_KEY); values never leave this
+process. Email/password bearer login stays as a legacy fallback path.
 """
 from __future__ import annotations
 
@@ -78,25 +80,65 @@ def _call(path: str, *, method: str = "GET", body: dict | None = None,
         raise CogneeUnavailable(f"{path}: {e}") from e
 
 
+def _multipart(fields: dict[str, str], files: dict[str, tuple[str, str]]) -> tuple[bytes, str]:
+    """Encode a multipart/form-data body (add endpoint is form, not JSON)."""
+    boundary = "----seraphcognee7d3a"
+    out = []
+    for name, value in fields.items():
+        out.append(f"--{boundary}\r\nContent-Disposition: form-data; "
+                   f"name=\"{name}\"\r\n\r\n{value}\r\n")
+    for name, (filename, content) in files.items():
+        out.append(f"--{boundary}\r\nContent-Disposition: form-data; "
+                   f"name=\"{name}\"; filename=\"{filename}\"\r\n"
+                   f"Content-Type: text/plain\r\n\r\n{content}\r\n")
+    out.append(f"--{boundary}--\r\n")
+    return "".join(out).encode(), boundary
+
+
 def store(text: str) -> dict:
-    """Ingest a fact/snippet; cognify runs server-side. Best-effort by callers."""
+    """Ingest a fact into the seraph dataset, then trigger cognify (async
+    graph build). Multipart add verified live; cognify is best-effort."""
+    body, boundary = _multipart(
+        {"datasetName": "seraph"},
+        {"data": (f"turn-{int(time.time() * 1000)}.txt", text[:4000])})
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}",
+               **_headers()}
+    req = urllib.request.Request(_base() + "/add", data=body, method="POST",
+                                 headers=headers)
     try:
-        return _call("/add", method="POST",
-                     body={"data": [{"text": text}], "dataset": "seraph"})
-    except CogneeUnavailable:
-        # tolerate body-shape drift
-        return _call("/add", method="POST", body={"data": text, "dataset": "seraph"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            resp = json.loads(r.read())
+    except Exception as e:  # noqa: BLE001
+        # tolerate body-shape drift; never stall a turn on this lane
+        raise CogneeUnavailable(f"add: {e}") from e
+    try:  # graph build trigger (verified shape); failure here is tolerable
+        tok_headers = _headers()
+        cj = urllib.request.Request(
+            _base() + "/cognify", method="POST",
+            data=json.dumps({"datasets": ["seraph"]}).encode(),
+            headers={"Content-Type": "application/json", **tok_headers})
+        urllib.request.urlopen(cj, timeout=10).read()
+    except Exception:  # noqa: BLE001, S110
+        pass
+    return resp if isinstance(resp, dict) else {}
 
 
 def search(query: str) -> list:
-    try:
-        out = _call("/search", method="POST",
-                    body={"query": query, "searchType": "INSIGHTS"})
-    except CogneeUnavailable:
-        out = _call("/search", method="POST",
-                    body={"searchQuery": query})
-    items = out if isinstance(out, list) else out.get("data") or out.get("results") or []
-    return items[:5]
+    out = _call("/search", method="POST",
+                body={"query": query, "search_type": "GRAPH_COMPLETION"},
+                timeout=12.0)
+    items = out if isinstance(out, list) else (out.get("results") or [])
+    texts: list = []
+    for item in items:
+        if isinstance(item, dict) and item.get("search_result"):
+            for s in item["search_result"]:
+                if isinstance(s, str) and s.strip():
+                    texts.append(s)
+        elif isinstance(item, dict) and item.get("text"):
+            texts.append(str(item["text"]))
+        elif isinstance(item, str):
+            texts.append(item)
+    return texts[:5]
 
 
 def recall_block(query: str) -> str:
@@ -109,12 +151,7 @@ def recall_block(query: str) -> str:
     except Exception:
         _BLOCKED_UNTIL = time.time() + 30
         return ""
-    out = []
-    for it in items:
-        t = it.get("text") if isinstance(it, dict) else str(it)
-        if t:
-            out.append(str(t)[:200])
-    return "\n".join(f"- {t}" for t in out[:3])
+    return "\n".join(f"- {str(t)[:200]}" for t in items[:3])
 
 
 def available() -> bool:
