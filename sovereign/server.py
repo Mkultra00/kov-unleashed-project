@@ -9,6 +9,7 @@ Run: .venv/bin/python -m uvicorn sovereign.server:app --port 8790
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 import sys
@@ -24,6 +25,13 @@ sys.path.insert(0, str(REPO_ROOT))
 from sovereign.config import REPO_ROOT, SovereignConfig  # noqa: E402
 from sovereign import llm, memory, operator, retrieval, stt, tts, websearch  # noqa: E402
 from sovereign.kb import KB  # noqa: E402
+
+try:  # Seraph App — optional; server runs pure-Atlas when this import fails
+    from seraph import brain as seraph_brain
+    from seraph import config as seraph_cfg
+except Exception:  # pragma: no cover
+    seraph_brain = None
+    seraph_cfg = None  # type: ignore[assignment]
 
 try:
     from src.voice_guard import clean  # guarded-output reuse from the LiveKit era
@@ -149,8 +157,14 @@ def _greeting_reply(user_text: str, fallback: str | None) -> str | None:
 
 @app.get("/health")
 async def health():
+    seraph_state = ({"enabled": bool(seraph_cfg and seraph_cfg.SERAPH_ENABLED),
+                     "lanes": ["gw", "hermes", "ollama"],
+                     "memory": "cognee(adapter)",
+                     "sandbox": "tinfoil(pending bunker)"}
+                    if seraph_cfg else {"enabled": False})
     return {"ok": True, "llm": CFG.llm_model, "llm_base": CFG.llm_base_url,
-            "operator": "on" if CFG.operator_enabled else "off"}
+            "operator": "on" if CFG.operator_enabled else "off",
+            "seraph": seraph_state}
 
 
 @app.get("/api/operator")
@@ -178,6 +192,24 @@ async def turn(text: str | None = Form(None), audio: UploadFile | None = File(No
     user_text = (text or transcript).strip()
     if not user_text:
         return JSONResponse({"error": "no input"}, status_code=400)
+
+    # SERAPH BRAIN (Kov Unleashed): with SERAPH=1, non-emergency chat turns route
+    # through the Kov-grade lane chain (gw -> hermes -> ollama, each timeout-guarded).
+    # Connector-hint turns and emergencies keep the Atlas operator/live lanes.
+    # On total lane failure the turn falls through to the battle-tested Atlas pipeline.
+    if (seraph_brain is not None and seraph_cfg is not None
+            and seraph_cfg.SERAPH_ENABLED
+            and not websearch.is_emergency(user_text) and _suggest(user_text) is None):
+        try:
+            br = await asyncio.to_thread(
+                seraph_brain.reply, user_text, HISTORY[-8:], timeout_s=35.0)
+            HISTORY.append({"role": "user", "content": user_text})
+            HISTORY.append({"role": "assistant", "content": br.text})
+            return JSONResponse({"transcript": transcript, "reply": br.text,
+                                 "operator": [], "live": False,
+                                 "seraph": br.as_dict()})
+        except Exception:  # noqa: BLE001 — Atlas lane is the always-on fallback
+            pass
 
     blocks = [b for b in (retrieval.context_block(user_text), memory.memory_block(user_text)) if b]
     live = await websearch.emergency_block(user_text)
