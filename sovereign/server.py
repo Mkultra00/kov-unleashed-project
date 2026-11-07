@@ -184,7 +184,7 @@ async def health():
             import urllib.request as _u
 
             with _u.urlopen(__import__("os").getenv("SERAPH_SIE_URL", "http://127.0.0.1:8090")
-                            + "/v1/embeddings", timeout=1.5) as _r:  # health ping only
+                            + "/readyz", timeout=1.5) as _r:  # health ping only (GET-able)
                 if _r.status < 500:
                     labels["retrieval"] = "superlinked-sie+keyword"
         except Exception:
