@@ -205,9 +205,16 @@ async def turn(text: str | None = Form(None), audio: UploadFile | None = File(No
                 seraph_brain.reply, user_text, HISTORY[-8:], timeout_s=35.0)
             HISTORY.append({"role": "user", "content": user_text})
             HISTORY.append({"role": "assistant", "content": br.text})
-            return JSONResponse({"transcript": transcript, "reply": br.text,
-                                 "operator": [], "live": False,
-                                 "seraph": br.as_dict()})
+            payload = {"transcript": transcript, "reply": br.text,
+                       "operator": [], "live": False,
+                       "seraph": br.as_dict()}
+            if CFG.eleven_api_key:  # voice lane — same TTS as Atlas path
+                try:
+                    audio_bytes = await tts.speak(br.text, CFG)
+                    payload["audio_b64"] = base64.b64encode(audio_bytes).decode()
+                except Exception as exc:  # voice lane optional; text still returns
+                    payload["audio_error"] = f"{type(exc).__name__}: {exc}"
+            return JSONResponse(payload)
         except Exception:  # noqa: BLE001 — Atlas lane is the always-on fallback
             pass
 
