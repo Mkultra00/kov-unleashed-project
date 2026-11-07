@@ -157,11 +157,40 @@ def _greeting_reply(user_text: str, fallback: str | None) -> str | None:
 
 @app.get("/health")
 async def health():
-    seraph_state = ({"enabled": bool(seraph_cfg and seraph_cfg.SERAPH_ENABLED),
-                     "lanes": ["gw", "hermes", "ollama"],
-                     "memory": "cognee(adapter)",
-                     "sandbox": "tinfoil(pending bunker)"}
-                    if seraph_cfg else {"enabled": False})
+    if not seraph_cfg:
+        seraph_state = {"enabled": False}
+    else:
+        labels = {
+            "memory": "jsonl+keyword",
+            "retrieval": "keyword",
+            "websearch": "osm+wiki+usgs",
+            "websearch_enclave": "locked (no tinfoil key)",
+            "sandbox": "off (manual gate)",
+        }
+        try:
+            from seraph import cognee_memory as _cgm
+            from seraph import tinfoil_websearch as _tws
+            from seraph import tinfoil_sandbox as _tsb
+
+            if seraph_cfg.SERAPH_MEMORY != "off" and _cgm.available():
+                labels["memory"] = "cognee(cloud)+jsonl-audit"
+            if _tws.available():
+                labels["websearch_enclave"] = "tinfoil-mcp(zdr)"
+            if _tsb.available():
+                labels["sandbox"] = "tinfoil-ready"
+        except Exception:
+            pass
+        try:
+            import urllib.request as _u
+
+            with _u.urlopen(__import__("os").getenv("SERAPH_SIE_URL", "http://127.0.0.1:8090")
+                            + "/v1/embeddings", timeout=1.5) as _r:  # health ping only
+                if _r.status < 500:
+                    labels["retrieval"] = "superlinked-sie+keyword"
+        except Exception:
+            pass
+        seraph_state = {"enabled": bool(seraph_cfg.SERAPH_ENABLED), "lanes": ["gw", "hermes", "ollama"],
+                        **labels}
     return {"ok": True, "llm": CFG.llm_model, "llm_base": CFG.llm_base_url,
             "operator": "on" if CFG.operator_enabled else "off",
             "seraph": seraph_state}

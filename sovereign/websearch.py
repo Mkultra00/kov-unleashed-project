@@ -294,6 +294,21 @@ async def emergency_block(user_text: str) -> str:
             if wiki_hits and wiki_hits[0]:
                 lines.append("PROCEDURE REFERENCES (live Wikipedia): "
                              + " | ".join(wiki_hits[0]))
+
+        # Tinfoil confidential websearch (MCP; ZDR enclave) — joins the
+        # context once TINFOIL_API_KEY is on the box; never blocks the
+        # OSM/Wiki/USGS fetches above (its own short budget, best-effort).
+        try:
+            from seraph import tinfoil_websearch as _tw
+
+            if _tw.available():
+                mcp = await asyncio.wait_for(
+                    asyncio.to_thread(_tw.search, user_text[:160]), timeout=8.0)
+                if mcp:
+                    lines.append("CONFIDENTIAL WEB (Tinfoil enclave, live): "
+                                 + mcp.replace("\\n", " ")[:700])
+        except Exception:
+            pass
     except Exception:
         pass
 
